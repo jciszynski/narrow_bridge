@@ -26,96 +26,15 @@ car *carArray;
 int arraySize;
 ticket_vm *tvm;
 
+// mutex chroniący printer (w danym momencie na ekran może wypisać tylko jeden wątek)
+pthread_mutex_t printer_mutex = PTHREAD_MUTEX_INITIALIZER;
 // mutex chroniący dostęp do mostu
-// pthread_mutex_t bridge_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t bridge_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 char interruptedFlag = 0;
 char debugFlag = 0;
 void sigintHandler();
-
-void printTraffic()
-{
-
-    char dirArrows[3];
-    car *carOnBridge = getCurOnBridge(carArray, arraySize);
-    int bridgeCarId;
-
-    if (carOnBridge == NULL)
-    {
-        bridgeCarId = -1;
-    }
-    else if (carOnBridge->state == BRIDGE_TO_A)
-    {
-        strcpy(dirArrows, "<<");
-        bridgeCarId = carOnBridge->id;
-    }
-    else if (carOnBridge->state == BRIDGE_TO_B)
-    {
-        strcpy(dirArrows, ">>");
-        bridgeCarId = carOnBridge->id;
-    }
-
-    int aTownCount = countCar(carArray, arraySize, TOWN_A);
-    int aQueueSize = countCar(carArray, arraySize, TOWN_A_QUEUE);
-    int bTownCount = countCar(carArray, arraySize, TOWN_B);
-    int bQueueSize = countCar(carArray, arraySize, TOWN_B_QUEUE);
-
-    if (bridgeCarId != -1)
-        printf("A-%d\t%d>>>\t[%s %d %s]\t<<<%d\t%d-B\n", aTownCount, aQueueSize, dirArrows, bridgeCarId, dirArrows, bQueueSize, bTownCount);
-    else
-        printf("A-%d\t%d>>>\t[       ]\t<<<%d\t%d-B\n", aTownCount, aQueueSize, bQueueSize, bTownCount);
-    fflush(stdout);
-
-    if (debugFlag)
-    {
-        SAVECURPOS();
-        fflush(stdout);
-        SETCURPOS(0, 21);
-        DELETELINE();
-        printf("Cars in TOWN A: \t");
-        for (int i = 0; i < arraySize; i++)
-        {
-            if (carArray[i].state == TOWN_A)
-                printf("%d ", carArray[i].id);
-        }
-        printf("\n");
-        DELETELINE();
-        printf("Cars in TOWN A QUEUE:\t");
-
-        car *inAQueue = listQueue(carArray, arraySize, TOWN_A_QUEUE);
-        for (int i = 0; i < countCar(carArray, arraySize, TOWN_A_QUEUE); i++)
-        {
-            printf("%d ", inAQueue[i].id);
-        }
-        free(inAQueue);
-
-        printf("\n");
-        DELETELINE();
-        printf("Cars on bridge: \t");
-        if (bridgeCarId != -1)
-            printf("%d", bridgeCarId);
-
-        printf("\n");
-        DELETELINE();
-        printf("Cars in TOWN B QUEUE:\t");
-        car *inBQueue = listQueue(carArray, arraySize, TOWN_B_QUEUE);
-        for (int i = 0; i < countCar(carArray, arraySize, TOWN_B_QUEUE); i++)
-        {
-            printf("%d ", inBQueue[i].id);
-        }
-        free(inBQueue);
-
-        printf("\n");
-        DELETELINE();
-        printf("Cars in TOWN B: \t");
-        for (int i = 0; i < arraySize; i++)
-        {
-            if (carArray[i].state == TOWN_B)
-                printf("%d ", carArray[i].id);
-        }
-        RESTORECURPOS();
-        fflush(stdout);
-    }
-}
+void printTraffic();
 
 void town()
 {
@@ -133,71 +52,59 @@ void bridge()
     free(array);
 }
 
-void enterTownAQueue(long tid)
+void enterTownQueue(long tid, int town)
 {
     carArray[tid].curTicket = getTicket(tvm);
-    carArray[tid].state = TOWN_A_QUEUE;
+    carArray[tid].state = town;
     printTraffic();
-    while (getNowServing(tvm) != carArray[tid].curTicket)
-        sleep(1);
-    // pthread_mutex_lock(&bridge_mutex);
 }
 
-void enterTownBQueue(long tid)
+void enterTown(long tid, int townNum)
 {
-    carArray[tid].curTicket = getTicket(tvm);
-    carArray[tid].state = TOWN_B_QUEUE;
-    printTraffic();
-    while (getNowServing(tvm) != carArray[tid].curTicket)
-        sleep(1);
-    // pthread_mutex_lock(&bridge_mutex);
-}
-
-void enterTownA(long tid)
-{
-    carArray[tid].state = TOWN_A;
+    carArray[tid].state = townNum;
     carArray[tid].curTicket = INT_MAX;
     release(tvm);
+    raise(SIGUSR1);
     printTraffic();
-    // pthread_mutex_unlock(&bridge_mutex);
+    town();
 }
 
-void enterTownB(long tid)
+void enterBridge(long tid, int direction)
 {
-    carArray[tid].state = TOWN_B;
-    carArray[tid].curTicket = INT_MAX;
-    release(tvm);
+    while (1)
+    {
+        pthread_mutex_lock(&bridge_mutex);
+        if (carArray[tid].curTicket == getNowServing(tvm)) 
+            break;
+        pthread_mutex_unlock(&bridge_mutex);
+    }
+
+    carArray[tid].state = direction;
     printTraffic();
-    // pthread_mutex_unlock(&bridge_mutex);
+    bridge();
+    pthread_mutex_unlock(&bridge_mutex);
 }
+
 void *car_thread(void *threadid)
 {
     long tid = (long)threadid;
 
     // za pierwszym razem nie chcemy wypisywać stanu kolejek
     carArray[tid].curTicket = getTicket(tvm);
-    while (getNowServing(tvm) != carArray[tid].curTicket)
-        sleep(1);
 
     while (!interruptedFlag)
     {
+        enterBridge(tid, BRIDGE_TO_B);
 
-        carArray[tid].state = BRIDGE_TO_B;
-        printTraffic();
-        bridge();
+        enterTown(tid, TOWN_B);
 
-        enterTownB(tid);
-        town();
+        enterTownQueue(tid, TOWN_B_QUEUE);
 
-        enterTownBQueue(tid);
+        enterBridge(tid, BRIDGE_TO_A);
 
-        carArray[tid].state = BRIDGE_TO_A;
-        printTraffic();
-        bridge();
+        enterTown(tid, TOWN_A);
 
-        enterTownA(tid);
-        town();
-        enterTownAQueue(tid);
+        enterTownQueue(tid, TOWN_A_QUEUE);
     }
 }
 
@@ -283,4 +190,90 @@ int main(int argc, char *argv[])
 void sigintHandler(int signum)
 {
     interruptedFlag = 1;
+}
+
+void printTraffic()
+{
+    pthread_mutex_lock(&printer_mutex);
+    char dirArrows[3];
+    car *carOnBridge = getCurOnBridge(carArray, arraySize);
+    int bridgeCarId;
+
+    if (carOnBridge == NULL)
+    {
+        bridgeCarId = -1;
+    }
+    else if (carOnBridge->state == BRIDGE_TO_A)
+    {
+        strcpy(dirArrows, "<<");
+        bridgeCarId = carOnBridge->id;
+    }
+    else if (carOnBridge->state == BRIDGE_TO_B)
+    {
+        strcpy(dirArrows, ">>");
+        bridgeCarId = carOnBridge->id;
+    }
+
+    int aTownCount = countCar(carArray, arraySize, TOWN_A);
+    int aQueueSize = countCar(carArray, arraySize, TOWN_A_QUEUE);
+    int bTownCount = countCar(carArray, arraySize, TOWN_B);
+    int bQueueSize = countCar(carArray, arraySize, TOWN_B_QUEUE);
+
+    if (bridgeCarId != -1)
+        printf("A-%d\t%d>>>\t[%s %d %s]\t<<<%d\t%d-B\n", aTownCount, aQueueSize, dirArrows, bridgeCarId, dirArrows, bQueueSize, bTownCount);
+    else
+        printf("A-%d\t%d>>>\t[       ]\t<<<%d\t%d-B\n", aTownCount, aQueueSize, bQueueSize, bTownCount);
+    fflush(stdout);
+
+    if (debugFlag)
+    {
+        SAVECURPOS();
+        fflush(stdout);
+        SETCURPOS(0, 21);
+        DELETELINE();
+        printf("Cars in TOWN A: \t");
+        for (int i = 0; i < arraySize; i++)
+        {
+            if (carArray[i].state == TOWN_A)
+                printf("%d ", carArray[i].id);
+        }
+        printf("\n");
+        DELETELINE();
+        printf("Cars in TOWN A QUEUE:\t");
+
+        car *inAQueue = listQueue(carArray, arraySize, TOWN_A_QUEUE);
+        for (int i = 0; i < countCar(carArray, arraySize, TOWN_A_QUEUE); i++)
+        {
+            printf("%d ", inAQueue[i].id);
+        }
+        free(inAQueue);
+
+        printf("\n");
+        DELETELINE();
+        printf("Cars on bridge: \t");
+        if (bridgeCarId != -1)
+            printf("%d", bridgeCarId);
+
+        printf("\n");
+        DELETELINE();
+        printf("Cars in TOWN B QUEUE:\t");
+        car *inBQueue = listQueue(carArray, arraySize, TOWN_B_QUEUE);
+        for (int i = 0; i < countCar(carArray, arraySize, TOWN_B_QUEUE); i++)
+        {
+            printf("%d ", inBQueue[i].id);
+        }
+        free(inBQueue);
+
+        printf("\n");
+        DELETELINE();
+        printf("Cars in TOWN B: \t");
+        for (int i = 0; i < arraySize; i++)
+        {
+            if (carArray[i].state == TOWN_B)
+                printf("%d ", carArray[i].id);
+        }
+        RESTORECURPOS();
+        fflush(stdout);
+    }
+    pthread_mutex_unlock(&printer_mutex);
 }
